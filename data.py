@@ -1,23 +1,18 @@
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
 import lightning.pytorch as pl
-import pickle
+import numpy as np
+
 
 DATA_PATH = 'Data/'
 
 
-def unpickle(file):
-    with open(file, 'rb') as fo:
-        data = pickle.load(fo, encoding='bytes')
-
-    return data
-
-
 class CIFAR10DataModule(pl.LightningDataModule):
-    def __init__(self, batch_size=64, num_workers=8):
+    def __init__(self, batch_size=64, num_workers=8, val_frac=0.3):
         super().__init__()
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.val_frac = val_frac
 
         mean = [0.4914, 0.4822, 0.4465]
         std = [0.2023, 0.1994, 0.2010]
@@ -33,21 +28,26 @@ class CIFAR10DataModule(pl.LightningDataModule):
             transforms.Normalize(mean, std)
         ])
 
-        self.cifar_train = None
-        self.cifar_test = None
+        self.train = None
+        self.train_sampler = None
+        self.val = None
+        self.valid_sampler = None
+        self.test = None
 
     def prepare_data(self):
-        self.cifar_train = datasets.CIFAR10(root=DATA_PATH, train=True, download=True, transform=self.train_transform)
-        self.cifar_test = datasets.CIFAR10(root=DATA_PATH, train=False, download=True, transform=self.test_transform)
+        train = datasets.CIFAR10(root=DATA_PATH, train=True, download=True, transform=self.train_transform)
+        self.test = datasets.CIFAR10(root=DATA_PATH, train=False, download=True, transform=self.test_transform)
+        val_amount = int(len(train) * self.val_frac)
+        self.train, self.val = random_split(train, [len(train) - val_amount, val_amount])
 
     def train_dataloader(self):
-        return DataLoader(self.cifar_train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.cifar_test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.cifar_test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
 
 class CIFAR100DataModule(pl.LightningDataModule):
@@ -70,18 +70,27 @@ class CIFAR100DataModule(pl.LightningDataModule):
             transforms.Normalize(mean, std)
         ])
 
-        self.cifar_train = None
-        self.cifar_test = None
+        self.train = None
+        self.train_sampler = None
+        self.val = None
+        self.valid_sampler = None
+        self.test = None
 
     def prepare_data(self):
-        self.cifar_train = datasets.CIFAR100(root=DATA_PATH, train=True, download=True, transform=self.train_transform)
-        self.cifar_test = datasets.CIFAR100(root=DATA_PATH, train=False, download=True, transform=self.test_transform)
+        train = datasets.CIFAR10(root=DATA_PATH, train=True, download=True, transform=self.train_transform)
+        indices = np.arange(len(train))
+        val_idx = list(np.random.choice(indices, size=int(len(train) * self.val_frac), replace=False))
+        train_idx = list(set(indices) - set(val_idx))
+        self.train_sampler = SubsetRandomSampler(indices[val_idx])
+        self.valid_sampler = SubsetRandomSampler(indices[train_idx])
+        self.train = datasets.CIFAR100(root=DATA_PATH, train=True, download=True, transform=self.train_transform)
+        self.test = datasets.CIFAR100(root=DATA_PATH, train=False, download=True, transform=self.test_transform)
 
     def train_dataloader(self):
-        return DataLoader(self.cifar_train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, sampler=self.train_sampler)
 
     def val_dataloader(self):
-        return DataLoader(self.cifar_test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, sampler=self.valid_sampler)
 
     def test_dataloader(self):
-        return DataLoader(self.cifar_test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)

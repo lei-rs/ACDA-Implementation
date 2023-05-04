@@ -39,13 +39,12 @@ def get_gabor_bases(ks, num_bases):
 
 
 class ADConv(nn.Module):
-    def __init__(self, in_channels, out_channels, num_bases, kernel_size, stride=1, padding=0, bases_type='FB'):
+    def __init__(self, in_channels, out_channels, kernel_size, num_fa, num_bases=6, padding=0, bias=True, bases_type='FB'):
         super(ADConv, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.num_bases = num_bases
         self.kernel_size = kernel_size
-        self.stride = stride
+        self.num_fa = num_fa
         self.padding = padding
 
         if bases_type == 'FB':
@@ -54,41 +53,74 @@ class ADConv(nn.Module):
             bases = get_gabor_bases(kernel_size, num_bases)
 
         self.register_buffer('bases', bases.float())
-        self.tem_size = len(bases)
+        self.total_bases = len(bases)
+        bc_dim = len(bases) * num_fa
 
-        bases_size = num_bases * len(bases)
-        inter = max(64, bases_size // 2)
+        inter = max(64, bc_dim // 2)
         self.bases_net = nn.Sequential(
-            nn.Conv2d(in_channels, inter, kernel_size=3, padding=1, stride=stride),
+            nn.Conv2d(in_channels, inter, kernel_size=3, padding=1, bias=bias),
             nn.BatchNorm2d(inter),
             nn.Tanh(),
-            nn.Conv2d(inter, bases_size, kernel_size=3, padding=1),
-            nn.BatchNorm2d(bases_size),
+            nn.Conv2d(inter, bc_dim, kernel_size=3, padding=1, bias=bias),
+            nn.BatchNorm2d(bc_dim),
             nn.Tanh()
         )
 
-        self.coef = nn.Parameter(torch.Tensor(out_channels, in_channels * num_bases, 1, 1))
+        self.coef = nn.Parameter(torch.Tensor(out_channels, in_channels * num_fa, 1, 1))
 
     def forward(self, x):
         N, C, H, W = x.shape
-        H = H // self.stride
-        W = W // self.stride
 
-        bases = self.bases_net(x).view(N, self.num_bases, self.tem_size, H, W)
-        bases = torch.einsum('bmkhw, kl->bmlhw', bases, self.bases)
-
-        x = F.unfold(x, kernel_size=self.kernel_size, stride=self.stride, padding=self.padding).view(
-            N, self.in_channels, self.kernel_size * self.kernel_size, H, W
-        )
-        bases_out = torch.einsum('bmlhw, bclhw->bcmhw', bases.view(N, self.num_bases, -1, H, W), x).reshape(
-            N, self.in_channels * self.num_bases, H, W
-        )
+        bases_coef = self.bases_net(x).transpose(1, -1).view(N, H, W, self.num_fa, self.total_bases)
+        atoms = (bases_coef.unsqueeze(-1) * self.bases).sum(-2).transpose(-1, -2)  # (N, H, W, kernel_size * kernel_size, num_fa)
+        x = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding).transpose(-1, -2).view(N, H, W, self.in_channels, -1)
+        bases_out = (x.unsqueeze(-1) * atoms.unsqueeze(-3)).sum(-2).view(N, H, W, -1).transpose(1, -1)
         out = F.conv2d(bases_out, self.coef)
 
         return out
 
 
+class ADLeNet(nn.Module):
+    def __init__(self, num_classes=4):
+        super(ADLeNet, self).__init__()
+        self.conv1 = ADConv(3, 6, 5, 4, padding=2)
+        self.conv2 = ADConv(6, 16, 5, 4, padding=2)
+        self.fc1 = nn.Linear(16 * 8 * 8, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.out = nn.Linear(84, num_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.avg_pool2d(x, 2, stride=2)
+        x = F.relu(self.conv2(x))
+        x = F.avg_pool2d(x, 2, stride=2)
+        x = x.view(-1, 16 * 8 * 8)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.out(x)
+
+
+class LeNet(nn.Module):
+    def __init__(self, num_classes=4):
+        super(LeNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 6, 5, padding=2)
+        self.conv2 = nn.Conv2d(6, 16, 5, padding=2)
+        self.fc1 = nn.Linear(16 * 8 * 8, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.out = nn.Linear(84, num_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.avg_pool2d(x, 2, stride=2)
+        x = F.relu(self.conv2(x))
+        x = F.avg_pool2d(x, 2, stride=2)
+        x = x.view(-1, 16 * 8 * 8)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.out(x)
+
+
 if __name__ == '__main__':
-    layer = ADConv(3, 10, 6, 3, padding=1, stride=2)
-    data = torch.randn(10, 3, 224, 224)
-    print(layer(data).shape)
+    x = torch.randn(10, 3, 224, 224)
+    conv = ADConv(3, 10, 5, 4, padding=2)
+    print(conv(x).shape)

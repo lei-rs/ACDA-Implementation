@@ -1,4 +1,5 @@
 from fb import calculate_FB_bases
+from Conv_DCFD import Conv_DCFD
 import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
@@ -38,23 +39,38 @@ def get_gabor_bases(ks, num_bases):
     return torch.from_numpy(np.asarray(filters))
 
 
+def get_random_bases(ks, num_bases):
+    sizes = ks // 2
+    filters = []
+
+    for m in range(sizes):
+        for n in range(num_bases):
+            f = np.random.randn(ks, ks).flatten()
+            f = f - np.mean(f) / np.std(f)
+            filters.append(f)
+
+    return torch.from_numpy(np.asarray(filters))
+
+
 class ADConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, num_fa, num_bases=6, padding=0, bias=True, bases_type='FB'):
+    def __init__(self, in_channels, out_channels, kernel_size, num_bases=6, padding=0, bias=True, bases_type='FB'):
         super(ADConv, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
-        self.num_fa = num_fa
+        self.num_bases = num_bases
         self.padding = padding
 
         if bases_type == 'FB':
             bases = bases_list(kernel_size, num_bases)
         elif bases_type == 'Gabor':
             bases = get_gabor_bases(kernel_size, num_bases)
+        elif bases_type == 'Random':
+            bases = get_random_bases(kernel_size, num_bases)
 
         self.register_buffer('bases', bases.float())
         self.total_bases = len(bases)
-        bc_dim = len(bases) * num_fa
+        bc_dim = len(bases) * num_bases
 
         inter = max(64, bc_dim // 2)
         self.bases_net = nn.Sequential(
@@ -66,25 +82,24 @@ class ADConv(nn.Module):
             nn.Tanh()
         )
 
-        self.coef = nn.Parameter(torch.Tensor(out_channels, in_channels * num_fa, 1, 1))
+        self.to_out = nn.Linear(in_channels * num_bases, out_channels, bias=bias)
 
     def forward(self, x):
         N, C, H, W = x.shape
 
-        bases_coef = self.bases_net(x).transpose(1, -1).view(N, H, W, self.num_fa, self.total_bases)
-        atoms = (bases_coef.unsqueeze(-1) * self.bases).sum(-2).transpose(-1, -2)  # (N, H, W, kernel_size * kernel_size, num_fa)
-        x = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding).transpose(-1, -2).view(N, H, W, self.in_channels, -1)
-        bases_out = (x.unsqueeze(-1) * atoms.unsqueeze(-3)).sum(-2).view(N, H, W, -1).transpose(1, -1)
-        out = F.conv2d(bases_out, self.coef)
-
+        bases_coef = self.bases_net(x).view(N, self.num_bases, self.total_bases, H, W).permute(0, 3, 4, 1, 2).contiguous()
+        atoms = (bases_coef.unsqueeze(-1) * self.bases).sum(-2).transpose(-1, -2).contiguous()  # (N, H, W, kernel_size * kernel_size, num_bases)
+        x = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding).view(N, self.in_channels, self.kernel_size**2, H, W).permute(0, 3, 4, 1, 2).contiguous()
+        bases_out = (x.unsqueeze(-1) * atoms.unsqueeze(-3)).sum(-2).view(N, H, W, self.in_channels * self.num_bases)
+        out = self.to_out(bases_out).permute(0, 3, 1, 2).contiguous()
         return out
 
 
 class ADLeNet(nn.Module):
     def __init__(self, num_classes=4):
         super(ADLeNet, self).__init__()
-        self.conv1 = ADConv(3, 6, 5, 4, padding=2)
-        self.conv2 = ADConv(6, 16, 5, 4, padding=2)
+        self.conv1 = ADConv(3, 6, 5, num_bases=5, padding=2, bases_type='FB')
+        self.conv2 = ADConv(6, 16, 5, num_bases=5, padding=2, bases_type='FB')
         self.fc1 = nn.Linear(16 * 8 * 8, 120)
         self.fc2 = nn.Linear(120, 84)
         self.out = nn.Linear(84, num_classes)
@@ -118,9 +133,3 @@ class LeNet(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.out(x)
-
-
-if __name__ == '__main__':
-    x = torch.randn(10, 3, 224, 224)
-    conv = ADConv(3, 10, 5, 4, padding=2)
-    print(conv(x).shape)

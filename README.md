@@ -1,0 +1,1 @@
+Run trainer.py with corresponding arguments to train the model.
